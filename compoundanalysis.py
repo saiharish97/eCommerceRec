@@ -11,94 +11,171 @@ Original file is located at
 from google.colab import drive
 import math
 import pandas as pd
-from pyspark.sql.functions import col,collect_list,udf,avg,max,min,when,rank,lit
+from pyspark.sql.functions import col, collect_list, udf, avg, max, min, when, rank, lit
 from pyspark.sql.window import Window
-from pyspark.sql.types import IntegerType, StructType, StructField, StringType, FloatType
+from pyspark.sql.types import (
+    IntegerType,
+    StructType,
+    StructField,
+    StringType,
+    FloatType,
+)
 import statistics as st
 from google.colab import drive
 import os
 import findspark
 from pyspark.sql import SparkSession
 
+
 class Homepage:
-  user_id=[]
-  topK=0
-  duration=0
-  purchase_thresholds=0
-  view_thresholds=0
-  catalog_path=""
-  user_history_path=""
-  historical_data={}
+    user_id = []
+    topK = 0
+    duration = 0
+    purchase_thresholds = 0
+    view_thresholds = 0
+    catalog_path = ""
+    user_history_path = ""
+    historical_data = {}
+    spark = None
 
-  def __init__(self, id, dur, purchase_threshold, view_threshold, topk):
-    self.user_id=id
-    self.duration=dur
-    self.purchase_thresholds=purchase_threshold
-    self.view_thresholds=view_threshold
-    self.topK=topk
-    self.catalog_path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/compoundAnalysisResources/catalog_store/"
-    self.user_history_path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/compoundAnalysisResources/user_history_store/"
-    try:
-      if(dur<30):
-        raise ValueError("Got duration less than 30. Please check and pass the value between [30, 190]")
-      else:
-        self.historical_data["catalog"]=spark.read.parquet(self.catalog_path+str(math.floor(dur/30))+"/")
-        self.historical_data["user_history"]=spark.read.parquet(self.user_history_path+str(math.floor(dur/30))+"/")
-    except ValueError as val_error:
-      print('Caught this error: ' + repr(val_error))
+    def __init__(self, id, dur, purchase_threshold, view_threshold, topk, spark):
+        self.user_id = id
+        self.duration = dur
+        self.purchase_thresholds = purchase_threshold
+        self.view_thresholds = view_threshold
+        self.topK = topk
+        self.spark = spark
+        self.catalog_path = "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/compoundAnalysisResources/catalog_store/"
+        self.user_history_path = "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/compoundAnalysisResources/user_history_store/"
+        try:
+            if dur < 30:
+                raise ValueError(
+                    "Got duration less than 30. Please check and pass the value between [30, 190]"
+                )
+            else:
+                self.historical_data["catalog"] = spark.read.parquet(
+                    self.catalog_path + str(math.floor(dur / 30)) + "/"
+                )
+                self.historical_data["user_history"] = spark.read.parquet(
+                    self.user_history_path + str(math.floor(dur / 30)) + "/"
+                )
+        except ValueError as val_error:
+            print("Caught this error: " + repr(val_error))
 
-  
-  def get_recommendations_by_price(self):
-    user_history_df=self.historical_data["user_history"].filter(col("user_id").isin(self.user_id))
-    user_history_df.cache()
-    purchase_user_history=user_history_df.filter(col("event_type")=="purchase").filter(col("event_count")>=self.purchase_thresholds)
-    purchase_users=[r[0] for r in purchase_user_history.select("user_id").rdd.collect()]
-    view_users=[item for item in self.user_id if item not in purchase_users]
-    view_user_history=user_history_df.filter(col("user_id").isin(view_users)).filter(col("event_type")=="view").filter(col("event_count")>=self.view_thresholds)
-    view_users=[r[0] for r in view_user_history.select("user_id").rdd.collect()]
-    cold_start_users=[item for item in self.user_id if (item not in purchase_users and item not in view_users)]
-    purchase_catalog=self.historical_data["catalog"].filter(col("event_type")=="purchase")
-    view_catalog=self.historical_data["catalog"].filter(col("event_type")=="view")
-    pid_cols=["pid_"+str(i) for i in range(1,self.topK+1)]
-    cols=["user_id","tag"]+pid_cols
-    rec_schema=StructType([StructField(c, StringType()) for c in cols])
-    purchase_info=purchase_user_history.select("user_id","event_type","event_count","avg_event_price","stddev","product_history").collect()
-    view_info=view_user_history.select("user_id","event_type","event_count","avg_event_price","stddev","product_history").collect()
-    recommendations=[]
-    user_history_df.unpersist()
-    purchase_catalog.cache()
-    view_catalog.cache()
-    for x in purchase_info:
-      sub_fac=0
-      if(x["stddev"]<10):
-        sub_fac=100
-      else:
-        sub_fac=x["stddev"]/x["event_count"]
-      recommendations.append([x[0],"purchase"]+purchase_catalog.filter(col("avg_price") > x["avg_event_price"]-(sub_fac)).filter(col("avg_price") < x["avg_event_price"]+(sub_fac)).filter(~col("product_id").isin(x["product_history"])).orderBy("event_count", ascending=False).select("product_id","category_code","brand","avg_price").rdd.map(lambda x: x[0]+" => "+x[1]+" => "+x[2]+" => "+str(x[3])).take(self.topK))
-    for x in view_info:
-      recommendations.append([x[0],"view"]+view_catalog.filter(col("avg_price") > x["avg_event_price"]-(x["stddev"]/x["event_count"])).filter(col("avg_price") < x["avg_event_price"]+(x["stddev"]/x["event_count"])).filter(~col("product_id").isin(x["product_history"])).orderBy("event_count", ascending=False).select("product_id","category_code","brand","avg_price").rdd.map(lambda x: x[0]+" => "+x[1]+" => "+x[2]+" => "+str(x[3])).take(self.topK))
-    coldstart_rec=purchase_catalog.orderBy("event_count", ascending=False).select("product_id","category_code","brand","avg_price").rdd.map(lambda x: x[0]+" => "+x[1]+" => "+x[2]+" => "+str(x[3])).take(self.topK)
-    for x in cold_start_users:
-      recommendations.append([x,"coldstart"]+coldstart_rec)
-    rec_df = spark.createDataFrame(data=spark.sparkContext.parallelize(recommendations),schema = rec_schema)
-    view_catalog.unpersist()
-    purchase_catalog.unpersist()
-    return rec_df
+    def get_recommendations_by_price(self):
+        user_history_df = self.historical_data["user_history"].filter(
+            col("user_id").isin(self.user_id)
+        )
+        user_history_df.cache()
+
+        purchase_user_history = user_history_df.filter(
+            col("event_type") == "purchase"
+        ).filter(col("event_count") >= self.purchase_thresholds)
+        purchase_users = [
+            r[0] for r in purchase_user_history.select("user_id").rdd.collect()
+        ]
+        view_users = [item for item in self.user_id if item not in purchase_users]
+        view_user_history = (
+            user_history_df.filter(col("user_id").isin(view_users))
+            .filter(col("event_type") == "view")
+            .filter(col("event_count") >= self.view_thresholds)
+        )
+        view_users = [r[0] for r in view_user_history.select("user_id").rdd.collect()]
+        cold_start_users = [
+            item
+            for item in self.user_id
+            if (item not in purchase_users and item not in view_users)
+        ]
+
+        purchase_catalog = (
+            self.historical_data["catalog"]
+            .filter(col("event_type") == "purchase")
+            .drop("event_type")
+        )
+        purchase_catalog.cache()
+
+        user_action_df = purchase_user_history.select(
+            "user_id",
+            "event_type",
+            "event_count",
+            "avg_event_price",
+            "stddev",
+            "product_history",
+        ).union(
+            view_user_history.select(
+                "user_id",
+                "event_type",
+                "event_count",
+                "avg_event_price",
+                "stddev",
+                "product_history",
+            )
+        )
+        user_action_with_bounds_df = (
+            user_action_df.withColumn(
+                "sub_fac",
+                when(col("stddev") <= 20, 40)
+                .when(col("stddev") / 2 <= 20, col("stddev"))
+                .otherwise(col("stddev") / 2),
+            )
+            .withColumn("lower_bound", col("avg_event_price") - col("sub_fac"))
+            .withColumn("upper_bound", col("avg_event_price") + col("sub_fac"))
+            .drop("sub_fac")
+        )
+        user_bound_info = user_action_with_bounds_df.select(
+            "user_id",
+            "event_type",
+            "avg_event_price",
+            "stddev",
+            "product_history",
+            "lower_bound",
+            "upper_bound",
+        )
+        user_prod_join = (
+            user_bound_info.join(
+                purchase_catalog,
+                [
+                    col("avg_price") >= col("lower_bound"),
+                    col("avg_price") <= col("upper_bound"),
+                ],
+            )
+            .filter("!array_contains(product_history, product_id)")
+            .drop("product_history")
+        )
+        window = Window.partitionBy(col("user_id")).orderBy(col("event_count").desc())
+        action_rec_df = user_prod_join.select(
+            "*", rank().over(window).alias("rank")
+        ).filter(col("rank") <= self.topK)
+        cold_start_rec = (
+            purchase_catalog.orderBy("event_count", ascending=False)
+            .select("product_id", "category_code", "brand", "avg_price")
+            .limit(self.topK)
+            .withColumn("users", lit(str(cold_start_users)))
+        )
+
+        user_history_df.unpersist()
+        purchase_catalog.unpersist()
+
+        return (action_rec_df, cold_start_rec)
+
 
 def main():
-    drive.mount('/content/drive')
+    drive.mount("/content/drive")
     os.system("apt-get install openjdk-8-jdk-headless -qq > /dev/null")
-    os.system("tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz")
+    os.system(
+        "tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz"
+    )
     os.system("pip install -q findspark")
     os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
     os.environ["SPARK_HOME"] = "/content/spark-3.0.3-bin-hadoop2.7"
     findspark.init()
     findspark.find()
-    spark = SparkSession.builder\
-         .master("local[*]")\
-         .appName("Colab")\
-         .config('spark.ui.port', '4050')\
-         .getOrCreate()
+    spark = (
+        SparkSession.builder.master("local[*]")
+        .appName("Colab")
+        .config("spark.ui.port", "4050")
+        .getOrCreate()
+    )
 
     print("This is the Homepage Recommendation Script:")
     h_obj = Homepage(
@@ -116,11 +193,12 @@ def main():
         purchase_threshold=4,
         view_threshold=70,
         topk=4,
-        spark=spark
+        spark=spark,
     )
     recs = h_obj.get_recommendations_by_price()
     recs[0].show(10, 0)
     recs[1].show(10, 0)
+
 
 if __name__ == "__main__":
     main()
