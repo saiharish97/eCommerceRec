@@ -8,11 +8,16 @@ Original file is located at
 """
 
 ### IMPORTS ###
-from google.colab import drive
 import math
+import os, sys
+import findspark
 import pandas as pd
-from pyspark.sql.functions import col, collect_list, udf, avg, max, min, when, rank, lit
+import statistics as st
+from typing import Any
+from google.colab import drive
+from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
+from pyspark.sql.functions import col, collect_list, udf, avg, max, min, when, rank, lit
 from pyspark.sql.types import (
     IntegerType,
     StructType,
@@ -20,11 +25,6 @@ from pyspark.sql.types import (
     StringType,
     FloatType,
 )
-import statistics as st
-from google.colab import drive
-import os
-import findspark
-from pyspark.sql import SparkSession
 
 
 class Homepage:
@@ -159,24 +159,34 @@ class Homepage:
         return (action_rec_df, cold_start_rec)
 
 
-def main():
-    drive.mount("/content/drive")
-    os.system("apt-get install openjdk-8-jdk-headless -qq > /dev/null")
-    os.system(
-        "tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz"
-    )
-    os.system("pip install -q findspark")
+def setup_env(flag):
+    if flag:
+        os.system("apt-get install openjdk-8-jdk-headless -qq > /dev/null")
+        os.system(
+            "tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz"
+        )
+        os.system("pip install -q findspark")
     os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
     os.environ["SPARK_HOME"] = "/content/spark-3.0.3-bin-hadoop2.7"
     findspark.init()
     findspark.find()
+    drive.mount("/content/drive")
     spark = (
         SparkSession.builder.master("local[*]")
         .appName("Colab")
         .config("spark.ui.port", "4050")
         .getOrCreate()
     )
+    return spark
 
+
+def main():
+    spark = Any
+    setup_arg = sys.argv[1:][0]
+    if setup_arg == "setup":
+        spark = setup_env(True)
+    else:
+        spark = setup_env(False)
     print("This is the Homepage Recommendation Script:")
     h_obj = Homepage(
         id=[
@@ -196,8 +206,8 @@ def main():
         spark=spark,
     )
     recs = h_obj.get_recommendations_by_price()
-    recs[0].show(10, 0)
-    recs[1].show(10, 0)
+    recs[0].show(100, 0)
+    recs[1].show(100, 0)
 
 
 if __name__ == "__main__":
