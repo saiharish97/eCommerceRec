@@ -160,6 +160,7 @@ class Homepage:
 
 
 def setup_env(flag):
+    drive.mount("/content/drive")
     if flag:
         os.system("apt-get install openjdk-8-jdk-headless -qq > /dev/null")
         os.system(
@@ -170,7 +171,6 @@ def setup_env(flag):
     os.environ["SPARK_HOME"] = "/content/spark-3.0.3-bin-hadoop2.7"
     findspark.init()
     findspark.find()
-    drive.mount("/content/drive")
     spark = (
         SparkSession.builder.master("local[*]")
         .appName("Colab")
