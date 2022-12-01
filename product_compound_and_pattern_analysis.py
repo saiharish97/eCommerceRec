@@ -13,7 +13,8 @@ Product Compound Analytics
 - User product view history
 
 Product Purchase Pattern Analytics
-- Market Basket Analysis through spark ML model
+- Approach #1 : associative confidence score between 2 products based on how many users/user_sessions for viewed/purchased events.
+- Approach #2 : Market Basket Analysis through spark ML model.
 
 # Spark Setup and Initialization
 """
