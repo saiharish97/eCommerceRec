@@ -34,92 +34,121 @@ spark.sparkContext._conf.getAll()
 import math
 import pandas as pd
 from typing import Any
-from pyspark.sql.functions import col,collect_list,udf,avg,stddev_pop,split,to_date
-from pyspark.sql.types import IntegerType, StructType, StructField, StringType, FloatType,TimestampType
+from pyspark.sql.functions import (
+    col,
+    collect_list,
+    udf,
+    avg,
+    stddev_pop,
+    split,
+    to_date,
+)
+from pyspark.sql.types import (
+    IntegerType,
+    StructType,
+    StructField,
+    StringType,
+    FloatType,
+    TimestampType,
+)
 import statistics as st
 
 ### RAW-DATA-ETL-PREPROCESSING ###
-class RawDataProcessor():
+class RawDataProcessor:
     """
-      This is a class for doing the raw data etl for event logs.
-        
-      Attributes:
-          df (Dataframe): The dataframe that holds the historical event logs.
-    """
-    df=Any
+    This is a class for doing the raw data etl for event logs.
 
-    def __init__(self, input,output):
+    Attributes:
+        df (Dataframe): The dataframe that holds the historical event logs.
+    """
+
+    df = Any
+
+    def __init__(self, input, output):
         """
-          The constructor for RawDataProcessor class.
-    
-          Parameters:
-            input (String): The path to input logs.
-            output (String): The path to save the processed logs.
+        The constructor for RawDataProcessor class.
+
+        Parameters:
+          input (String): The path to input logs.
+          output (String): The path to save the processed logs.
         """
-        self.df=self.extractFromCsv(input)
+        self.df = self.extractFromCsv(input)
         self.preprocessData(self.df)
-        self.loadAsParquet(self.df,output)
+        self.loadAsParquet(self.df, output)
 
     def extractFromCSV(input_file):
         """
-          This method reads the given csv into a dataframe.
-      
-          Parameters:
-            input_file (String): The path to input logs.
-        
-          Returns:
-            The dataframe containing raw logs.
-      
+        This method reads the given csv into a dataframe.
+
+        Parameters:
+          input_file (String): The path to input logs.
+
+        Returns:
+          The dataframe containing raw logs.
+
         """
-        df=spark.read.option("header","true").csv(input_file)
+        df = spark.read.option("header", "true").csv(input_file)
         return df
 
     def preprocessData(df):
-      """
+        """
         This method corrects the schema and does some transformations.
-
         The schema is corrected and null values are removed.
-    
+
         Parameters:
           df (Dataframe): The dataframe containing raw logs.
-      
+
         Returns:
           The dataframe after processing the logs.
-    
-      """
-      dfSchemaChange=df.withColumn("event_time",col("event_time").cast(TimestampType()))\
-            .withColumn("price",col("price").cast(FloatType()))\
-            .withColumn("date",to_date(col("event_time")))\
-            .select("event_time","date","event_type","product_id","category_id","category_code","brand","price","user_id","user_session").na.drop(how="any")  
-      return dfSchemaChange
 
-    def loadAsParquet(df,output_path):
-      """
+        """
+        dfSchemaChange = (
+            df.withColumn("event_time", col("event_time").cast(TimestampType()))
+            .withColumn("price", col("price").cast(FloatType()))
+            .withColumn("date", to_date(col("event_time")))
+            .select(
+                "event_time",
+                "date",
+                "event_type",
+                "product_id",
+                "category_id",
+                "category_code",
+                "brand",
+                "price",
+                "user_id",
+                "user_session",
+            )
+            .na.drop(how="any")
+        )
+        return dfSchemaChange
+
+    def loadAsParquet(df, output_path):
+        """
         This method loads the processed dataframe as a parquet file at the specified location
-
         The schema is corrected and null values are removed.
-    
+
         Parameters:
           df (Dataframe): The dataframe containing processed logs.
           output_path (String): The path to save the processed logs.
-
         Returns:
           None
-    
-      """
-      tag="schema_verified/"
-      df.write.mode('append').partitionBy("date").parquet(output_path+tag)
 
-class UserProfileGenerator():
+        """
+        tag = "schema_verified/"
+        df.write.mode("append").partitionBy("date").parquet(output_path + tag)
+
+
+class UserProfileGenerator:
     """
-      This is a class for profile generation on users.
-        
-      Attributes:
-          total_df (Dataframe): The dataframe that holds the historical data of the users.
-          save_flag (Boolean): True if save is required.
-          save_tag (String): A tag which is given to the save location.
-          category_flag (Boolean): True if the profile is to be generated at category level.
+    This is a class for profile generation on users.
+
+    Attributes:
+        total_df (Dataframe): The dataframe that holds the historical data of the users.
+        save_flag (Boolean): True if save is required.
+        save_tag (String): A tag which is given to the save location.
+        category_flag (Boolean): True if the profile is to be generated at category level.
     """
+
     total_df = Any
     save_flag = False
     save_tag = "new"
@@ -127,13 +156,13 @@ class UserProfileGenerator():
 
     def __init__(self, tdf, save_flag, save_tag, category_flag):
         """
-          The constructor for UserProfileGenerator class.
-    
-          Parameters:
-            tdf (Dataframe): The dataframe consisting user historical data.
-            save_flag (Boolean): True if save is required.  Default is False.
-            save_tag (String): A tag which is given to the save location.
-            category_flag (Boolean): True if the profile is to be generated at category level.
+        The constructor for UserProfileGenerator class.
+
+        Parameters:
+          tdf (Dataframe): The dataframe consisting user historical data.
+          save_flag (Boolean): True if save is required.  Default is False.
+          save_tag (String): A tag which is given to the save location.
+          category_flag (Boolean): True if the profile is to be generated at category level.
         """
         self.total_df = tdf
         self.save_flag = save_flag
@@ -141,20 +170,19 @@ class UserProfileGenerator():
         self.category_flag = category_flag
         self.user_history_generator()
 
-
     def user_history_generator(self):
         """
-          This method generates the user profile by generating some stats.
-        
-          The stats generated are: [event_count,avg_price,stddev_price,event_price_history,product_purchase_history]
-          The dataframe is saved in parquet format.
-        
-          Parameters:
-            None
-        
-          Returns:
-            None
-      
+        This method generates the user profile by generating some stats.
+
+        The stats generated are: [event_count,avg_price,stddev_price,event_price_history,product_purchase_history]
+        The dataframe is saved in parquet format.
+
+        Parameters:
+          None
+
+        Returns:
+          None
+
         """
 
         if self.category_flag == False:
@@ -177,7 +205,7 @@ class UserProfileGenerator():
                 self.total_df.select("user_id", "event_type", "price")
                 .groupBy("user_id", "event_type")
                 .agg(
-                    stddev_pop("price").alias("stddev"),    
+                    stddev_pop("price").alias("stddev"),
                     collect_list("price").alias("event_history"),
                 )
             )
@@ -247,16 +275,18 @@ class UserProfileGenerator():
                 )
             ct_total_df.unpersist()
 
-class CatalogGenerator():
+
+class CatalogGenerator:
     """
-      This is a class for product catalog generation.
-        
-      Attributes:
-          total_df (Dataframe): The dataframe that holds the historical event data.
-          save_flag (Boolean): True if save is required.
-          save_tag (String): A tag which is given to the save location.
-          category_flag (Boolean): True if the catalog is to be generated at category level.
+    This is a class for product catalog generation.
+
+    Attributes:
+        total_df (Dataframe): The dataframe that holds the historical event data.
+        save_flag (Boolean): True if save is required.
+        save_tag (String): A tag which is given to the save location.
+        category_flag (Boolean): True if the catalog is to be generated at category level.
     """
+
     total_df = Any
     save_flag = False
     save_tag = "new"
@@ -264,13 +294,13 @@ class CatalogGenerator():
 
     def __init__(self, tdf, save_flag, save_tag, category_flag):
         """
-          The constructor for CatalogGenerator class.
-    
-          Parameters:
-            tdf (Dataframe): The dataframe consisting user historical data.
-            save_flag (Boolean): True if save is required.  Default is False.
-            save_tag (String): A tag which is given to the save location.
-            category_flag (Boolean): True if the catalog is to be generated at category level.
+        The constructor for CatalogGenerator class.
+
+        Parameters:
+          tdf (Dataframe): The dataframe consisting user historical data.
+          save_flag (Boolean): True if save is required.  Default is False.
+          save_tag (String): A tag which is given to the save location.
+          category_flag (Boolean): True if the catalog is to be generated at category level.
         """
         self.total_df = tdf
         self.save_flag = save_flag
@@ -280,16 +310,16 @@ class CatalogGenerator():
 
     def product_catalog_generator(self):
         """
-          This method generates the product catalog by generating some stats.
-        
-          The catalog generated contains the following fields for each product for each event type: [event_count,avg_price]
-          The dataframe is saved in parquet format.
-        
-          Parameters:
-            None
-        
-          Returns:
-            None
+        This method generates the product catalog by generating some stats.
+
+        The catalog generated contains the following fields for each product for each event type: [event_count,avg_price]
+        The dataframe is saved in parquet format.
+
+        Parameters:
+          None
+
+        Returns:
+          None
         """
         if self.category_flag == False:
             self.total_df.cache()
@@ -355,35 +385,47 @@ class CatalogGenerator():
                 )
             ct_total_df.unpersist()
 
-def main():
-  execution_mode="user_profile_etl"
-  raw_data_files = [
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019-Nov.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019-Oct.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019_Dec.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Jan.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Feb.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Mar.csv",\
-      "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Apr.csv"
-      ]
-  output_parquet_save_path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/"
-  year_month={"2020":["03","04"]}
-  paths=[]
 
-  if execution_mode=="raw_data_etl":
-    for path in raw_data_files:
-      RawDataProcessor(path,output_parquet_save_path)
-  else:
-    for year, months in year_month.items():
-      for month in months:
-        paths.append("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="+year+"-"+month+"*")
-    basePath="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/"
-    tdf=spark.read.option("basePath",basePath).parquet(*paths)
-    
-    if execution_mode=="user_profile_etl":
-      UserProfileGenerator(tdf=tdf,save_flag=True,save_tag="2",category_flag=True)
-    elif execution_mode=="catalog_etl":
-      CatalogGenerator(tdf=tdf,save_flag=True,save_tag="4",category_flag=True)
+def main():
+    execution_mode = "user_profile_etl"
+    raw_data_files = [
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019-Nov.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019-Oct.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2019_Dec.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Jan.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Feb.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Mar.csv",
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/2020-Apr.csv",
+    ]
+    output_parquet_save_path = (
+        "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/"
+    )
+    year_month = {"2020": ["03", "04"]}
+    paths = []
+
+    if execution_mode == "raw_data_etl":
+        for path in raw_data_files:
+            RawDataProcessor(path, output_parquet_save_path)
+    else:
+        for year, months in year_month.items():
+            for month in months:
+                paths.append(
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+        basePath = "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/"
+        tdf = spark.read.option("basePath", basePath).parquet(*paths)
+
+        if execution_mode == "user_profile_etl":
+            UserProfileGenerator(
+                tdf=tdf, save_flag=True, save_tag="2", category_flag=True
+            )
+        elif execution_mode == "catalog_etl":
+            CatalogGenerator(tdf=tdf, save_flag=True, save_tag="4", category_flag=True)
+
 
 if __name__ == "__main__":
     main()
