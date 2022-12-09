@@ -8,24 +8,29 @@ Original file is located at
 """
 
 from google.colab import drive
-drive.mount('/content/drive/',force_remount=True)
-!apt-get install openjdk-8-jdk-headless -qq > /dev/null
-!tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz
-!pip install -q findspark
+
+drive.mount("/content/drive/", force_remount=True)
+#!apt-get install openjdk-8-jdk-headless -qq > /dev/null
+#!tar xf /content/drive/Shareddrives/FourYottaBytes_DA231o/spark-3.0.3-bin-hadoop2.7.tgz
+#!pip install -q findspark
 import os
+
 os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
 os.environ["SPARK_HOME"] = "/content/spark-3.0.3-bin-hadoop2.7"
 import findspark
+
 findspark.init()
 findspark.find()
 from pyspark.sql import SparkSession
-spark = SparkSession.builder\
-         .master("local[*]")\
-         .appName("Colab")\
-         .config('spark.ui.port', '4050')\
-         .config("spark.executor.memory", '8g')\
-         .config("spark.driver.memory", '16g')\
-         .getOrCreate()
+
+spark = (
+    SparkSession.builder.master("local[*]")
+    .appName("Colab")
+    .config("spark.ui.port", "4050")
+    .config("spark.executor.memory", "8g")
+    .config("spark.driver.memory", "16g")
+    .getOrCreate()
+)
 spark
 
 spark.sparkContext._conf.getAll()
@@ -93,6 +98,7 @@ class RawDataProcessor:
     def preprocessData(df):
         """
         This method corrects the schema and does some transformations.
+
         The schema is corrected and null values are removed.
 
         Parameters:
@@ -125,11 +131,13 @@ class RawDataProcessor:
     def loadAsParquet(df, output_path):
         """
         This method loads the processed dataframe as a parquet file at the specified location
+
         The schema is corrected and null values are removed.
 
         Parameters:
           df (Dataframe): The dataframe containing processed logs.
           output_path (String): The path to save the processed logs.
+
         Returns:
           None
 
@@ -174,9 +182,14 @@ class UserProfileGenerator:
         """
         This method generates the user profile by generating some stats.
 
-        The stats generated are: [event_count,avg_price,stddev_price,event_price_history,product_purchase_history]
         The dataframe is saved in parquet format.
-
+        The stats generated are:  [
+                                    event_count,
+                                    avg_price,
+                                    stddev_price,
+                                    event_price_history,
+                                    product_purchase_history
+                                  ]
         Parameters:
           None
 
@@ -386,6 +399,682 @@ class CatalogGenerator:
             ct_total_df.unpersist()
 
 
+class XFactorGenerator:
+    def x_factor_to_bin(x_factor):
+        if x_factor == "NaN":
+            return x_factor
+        elif x_factor < -0.90:
+            return 0
+        elif x_factor < -0.75:
+            return 1
+        elif x_factor < -0.60:
+            return 2
+        elif x_factor < -0.45:
+            return 3
+        elif x_factor < -0.30:
+            return 4
+        elif x_factor < -0.15:
+            return 5
+        elif x_factor < 0.00:
+            return 6
+        elif x_factor < 0.15:
+            return 7
+        elif x_factor < 0.30:
+            return 8
+        elif x_factor < 0.45:
+            return 9
+        elif x_factor < 0.60:
+            return 10
+        elif x_factor < 0.75:
+            return 11
+        elif x_factor < 0.9:
+            return 12
+        else:
+            return 13
+
+    udf_xbin = udf(x_factor_to_bin, IntegerType())
+
+    def PPA2_ETL(df_current, year, month):
+        ### First find the category wise statistics of all products (not just purchased)
+        df_0 = df_current.select("category_code", "product_id", "price")
+        df_2 = (
+            df_0.groupBy("category_code", "product_id")
+            .agg(
+                avg("price").alias("mean_product_price"),
+                sum("price").alias("total_sale"),
+            )
+            .withColumn("count", round(col("total_sale") / col("mean_product_price")))
+            .drop("total_sale")
+        )
+        df_3 = (
+            df_2.groupBy("category_code")
+            .agg(
+                avg("mean_product_price").alias("category_mean_price"),
+                stddev("mean_product_price").alias("category_stddev"),
+                sum("count").alias("num_products_sold_in_cat"),
+            )
+            .filter(col("category_stddev") != "NaN")
+        )
+        # df_3.printSchema()
+        # df_3.show()
+        df_3.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/PPA2/Category_Metrics_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        print("Written Category Metrics " + year + " " + month)
+
+        ### Now I want the x_factor of any product ever purchased
+        df_1 = df_current.filter(col("event_type") == "purchase").select(
+            "category_code", "product_id", "user_id", "price"
+        )
+        df_2b = df_1.groupBy("category_code", "product_id").agg(
+            avg("price").alias("mean_product_price")
+        )
+
+        df_4 = df_2b.withColumnRenamed("category_code", "product_category_code")
+        df_4a = df_4.join(df_3, df_3.category_code == df_4.product_category_code).drop(
+            "product_category_code", "num_products_sold_in_cat"
+        )
+        df_4b = (
+            df_4a.withColumn("main_cat", split("category_code", "\.")[0])
+            .withColumn("sub_cat", split("category_code", "\.")[1])
+            .withColumn("prime_cat", concat(col("main_cat"), lit("."), col("sub_cat")))
+            .drop("main_cat", "sub_cat")
+        )
+        df_5 = df_4b.withColumn(
+            "prod_x_factor",
+            (col("mean_product_price") - col("category_mean_price"))
+            / col("category_stddev"),
+        ).drop("mean_product_price", "category_mean_price", "category_stddev")
+        df_5b = df_5.withColumn("Product_Bin", udf_xbin(df_5.prod_x_factor)).drop(
+            "prod_x_factor"
+        )
+        # df_5b.printSchema()
+        # df_5.show()
+        # df_5.filter(col("prod_x_factor") == "NaN").show()
+        df_5b.write.partitionBy("prime_cat", "Product_Bin").parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/PPA2/Product_Bins_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        print("Written Product Bins " + year + " " + month)
+
+        ### Now I want the x_factors of users based on their purchases
+        df_6 = df_1.select("user_id", "product_id").withColumnRenamed(
+            "product_id", "user_purchase_product_id"
+        )
+        df_6a = df_6.join(df_5, df_5.product_id == df_6.user_purchase_product_id).drop(
+            "user_purchse_product_id"
+        )
+        df_7 = (
+            df_6a.groupBy("user_id")
+            .agg(
+                avg("prod_x_factor").alias("user_x_factor"),
+                sum("prod_x_factor").alias("total_x_factor"),
+            )
+            .withColumn(
+                "purchase_count", (round(col("total_x_factor") / col("user_x_factor")))
+            )
+            .drop("total_x_factor")
+        )
+        # df_7.printSchema()
+        # df_7.show()
+        # df_7.filter(col("user_x_factor") == "NaN").show()
+
+        ### df_7b = df_7.withColumn("User_Bin", udf_xbin(df_7.user_x_factor)).drop("user_x_factor")
+        ### We do not save user bins because we average user bins from different months during recommendation time
+
+        df_7.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/PPA2/User_x_factor_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        print("Written User_x_factors " + year + " " + month)
+
+    def run_df_gen(total_df):
+        # Select only the necessary columns
+        df_0 = (
+            total_df.sample(False, 1.0, 123)
+            .select("category_code", "user_id", "event_type", "product_id", "price")
+            .filter(col("category_code") != "null")
+        )
+
+        # We need prime category for a lot of computations
+        df_1 = (
+            df_0.withColumn("main_cat", split("category_code", "\.")[0])
+            .withColumn("sub_cat", split("category_code", "\.")[1])
+            .withColumn("prime_cat", concat(col("main_cat"), lit("."), col("sub_cat")))
+            .drop("main_cat", "sub_cat")
+        )
+
+        # We need the category wise mean and stddev of product prices so we can compare the user's purchase value
+        # Average price of a product itself
+        df_2 = (
+            df_1.select("prime_cat", "category_code", "product_id", "price")
+            .groupBy("prime_cat", "category_code", "product_id", "price")
+            .agg(avg(col("price").cast("double")).alias("Mean_Product_Price"))
+        )
+        ### Dataframe features
+        ### prime_cat - category code truncated to first 2 strings
+        ### category_code - full category code
+        ### product_id - unique id of a product in a category/prime_cat
+        ### Mean_Product_Price - average price of that product across all its events in the system
+
+        # Calculate average price and standard deviation of prices of all products in a category
+        df_3 = (
+            df_2.groupBy("prime_cat", "category_code")
+            .agg(
+                avg("Mean_Product_Price").alias("Mean_Price"),
+                stddev("Mean_Product_Price").alias("StdDev"),
+                sum("Mean_Product_Price").alias("Total_Sale"),
+            )
+            .withColumn("Product_Count", round(col("Total_sale") / col("Mean_Price")))
+            .drop("Total_Sale")
+        )
+        ### Dataframe description
+        ### prime_cat - truncated category code
+        ### category_code - Full category code
+        ### Mean_Price - Mean price of products in this category
+        ### StdDev - Standard Deviation of product prices in this category
+        ### Product_Count - count of products per category code
+
+        # Correcting the StdDev so that categories with a single product have Standard Deviation 0
+        # df_3 = df_3.na.fill(0)
+        # df_3.printSchema()
+        print(
+            "Writing: /content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/Category_Stats_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        df_3.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/Category_Stats_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+
+        # df_3 is a dataframe consisting of prime_category wise category statistics of mean and stddev -> This is our requirement
+        # We will use this to calculate the user's x-factor and then retrieve recommendations on that basis too
+
+        ### We should save monthly calculated x-factors as parquets ###
+
+        # Isolating all the purchase records only
+        ### This dataframe has user_id, category of purchase and the price of the purchase
+        ### We are not concerned with what product this was, we just want to have a user behaviour estimation based on category metric references
+        df_4 = (
+            df_0.filter(col("event_Type") == "purchase")
+            .select("user_id", "category_code", "price")
+            .withColumnRenamed("category_code", "user_purchase_cat")
+        )
+
+        # Relating each purchase with the category metrics
+        df_5 = (
+            df_4.join(df_3, df_4.user_purchase_cat == df_3.category_code)
+            .drop("user_purchase_cat", "prime_cat", "Product_Count")
+            .filter(col("StdDev") != "NaN")
+        )
+        # Calculating x-factor for every purchase and grouper to get the final avergae x-factor for a user
+        df_6 = (
+            df_5.withColumn(
+                "x_factor", (col("price") - col("Mean_Price")) / col("StdDev")
+            )
+            .groupBy("user_id")
+            .agg(avg("x_factor").alias("x_factor"), sum("x_factor").alias("total"))
+            .withColumn("Purchase_Count", round(col("total") / col("x_factor")))
+            .drop("total")
+        )
+        ### Dataframe description
+        ### user_id - unique user identifier
+        ### x-factor - average x-factor of all purchases made by the user, a behavioural metric
+        ### Purchase_Count - purchases of this user over which x_factor is calculated
+
+        # df_bad_1 = df_6.filter(col("x_factor") == "NaN")
+        # df_bad_1.show()
+
+        print(
+            "Writing: /content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/User_x_factor_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        df_6.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/User_x_factor_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+
+        # df_6 is a user behavioural aspect dataframe which tells us what to retrieve for a user's suggestions
+        # based on past purchase activity of the user
+
+        # Now we need to find the x-factor of every purchased product id with respect to its category's metrics
+        df_7 = (
+            df_0.filter(col("event_type") == "purchase")
+            .select("product_id", "category_code", "price")
+            .withColumnRenamed("category_code", "product_cat_code")
+        )
+        # Average price at which the product was purchased
+        df_8 = df_7.groupBy("product_cat_code", "product_id").agg(
+            avg("price").alias("Mean_Product_Price")
+        )
+        ### Dataframe description
+        ### category_code - full category code for the product
+        ### product_id - unique id of the product
+        ### Mean_Product_Price - average selling price of the product in the past
+
+        df_9 = (
+            df_8.join(df_3, df_8.product_cat_code == df_3.category_code)
+            .drop("product_cat_code", "Product_Count")
+            .filter(col("StdDev") != "NaN")
+        )
+        df_10 = df_9.withColumn(
+            "x_factor", (col("Mean_Product_Price") - col("Mean_Price")) / col("StdDev")
+        ).drop("Mean_Price", "StdDev")
+        ### Dataframe description
+        ### product_id - unique id of the product
+        ### Mean_Product_Price - average selling price of the product in the past
+        ### prime_cat - truncated category code
+        ### category_code - Full category code
+        ### x-factor - x-factor of this particular product wrt its category metrics
+
+        # df_10 is now a list of all products that were ever purchased with their x-factor wrt their category average
+        # We will use this dataframe for binning the products based on their x-factors and suggesting from a category later
+
+        # df_bad_2 = df_10.filter(col("x_factor") == "NaN")
+        # df_bad_2.show()
+
+        ###
+        # < -0.9 --> 0
+        # < -0.75 --> 1
+        # < -0.6 --> 2
+        # < -0.45 --> 3
+        # < -0.3 --> 4
+        # < -0.15 --> 5
+        # < 0.0 --> 6
+        # < 0.15 --> 7
+        # < 0.30 --> 8
+        # < 0.45 --> 9
+        # < 0.6 --> 10
+        # < 0.75 --> 11
+        # < 0.9 --> 12
+        # > 0.9 --> 13
+        ###
+
+        udf_binning = udf(reduce_x_factor_to_bin, IntegerType())
+        df_11 = df_10.withColumn("Bin", udf_binning(df_10.x_factor)).drop("x_factor")
+        ### Added new feature to bin x_factor and categorize it
+        ### Dataframe description
+        ### product_id - unique id of the product
+        ### Mean_Product_Price - average selling price of the product in the past
+        ### prime_cat - truncated category code
+        ### category_code - Full category code
+        ### Bin - x-factor CATEGORIZED for this particular product wrt its category metrics
+
+        print(
+            "Writing: /content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/Product_Bins_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        df_11.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Price_Point_Analysis/Product_Bins_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+
+
+class SessionInsights:
+    def user_conversion_rate(df_current, year, month):
+        df_0 = df_current  # .sample(False, 0.000001, 123)
+        df_1 = (
+            df_0.filter(col("event_type") == "purchase")
+            .groupBy("user_id", "user_session")
+            .count()
+            .withColumnRenamed("count", "session_purchase_count")
+        )
+        df_1a = df_1.groupBy("user_id").agg(
+            sum("session_purchase_count").alias("total_purchase_count"),
+            avg("session_purchase_count").alias("average_session_purchase_count"),
+        )
+        df_1b = df_1a.withColumn(
+            "purchase_session_count",
+            round(col("total_purchase_count") / col("average_session_purchase_count")),
+        ).drop("average_session_purchase_count")
+        # df_1b.printSchema()
+        # df_1b.show(10, False)
+
+        df_2 = (
+            df_0.filter(col("event_type") == "view")
+            .groupBy("user_id", "user_session")
+            .count()
+            .withColumnRenamed("count", "session_view_count")
+        )
+        df_2a = df_2.groupBy("user_id").agg(
+            sum("session_view_count").alias("total_view_count"),
+            avg("session_view_count").alias("average_session_view_count"),
+        )
+        df_2b = df_2a.withColumn(
+            "view_session_count",
+            round(col("total_view_count") / col("average_session_view_count")),
+        ).drop("average_session_view_count")
+        # df_2b.printSchema()
+        # df_2b.show(10, False)
+
+        df_3 = df_2b.withColumnRenamed("user_id", "view_user_id")
+        df_4 = df_3.join(df_1b, df_3.view_user_id == df_1b.user_id).drop("view_user_id")
+        df_4a = df_4.withColumn(
+            "session_conversion_rate",
+            col("purchase_session_count") / col("view_session_count"),
+        ).withColumn(
+            "event_conversion_rate",
+            col("total_purchase_count") / col("total_view_count"),
+        )
+        # df_4a.printSchema()
+        df_4a.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Conversion_Rates/CR_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        print(
+            "Written "
+            + "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Conversion_Rates/CR_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+
+    def continue_left_off(df_current, month, year):
+        df_0 = df_current  # .sample(False, 0.000001, 123)
+        df_1 = (
+            df_0.filter(col("event_type") == "view")
+            .select("user_id", "product_id")
+            .groupBy("user_id", "product_id")
+            .count()
+            .drop("count")
+        )
+        # df_1.printSchema()
+        # df_1.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Continue_Where_You_Left_Off/Category_Metrics_"+year+"_"+month+".parquet")
+
+        df_2 = (
+            df_0.filter(col("event_type") == "purchase")
+            .select("user_id", "product_id")
+            .groupBy("user_id", "product_id")
+            .count()
+            .drop("count")
+        )
+        # df_2.printSchema()
+        # df_2.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Continue_Where_You_Left_Off/Category_Metrics_"+year+"_"+month+".parquet")
+
+        # df_3 = df_1.join(df_2, (df_1.user_id_view == df_2.user_id_purchase) & (df_1.view_product_id == df_2.purchase_product_id)).drop("user_id_purchase", "purchase_product_id")
+        # df_3.printSchema()
+        # df_3.show(10, False)
+
+        df_4 = df_1.subtract(df_2)
+        # df_4.printSchema()
+        df_4.write.parquet(
+            "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Continue_Where_You_Left_Off/CWYLO_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        print(
+            "Written "
+            + "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Continue_Where_You_Left_Off/CWYLO_"
+            + year
+            + "_"
+            + month
+            + ".parquet"
+        )
+        ###This DF can be ordered on the basis of count of views or recency of the views
+
+        def product_pattern_gen(total_df, year, month, target_col, minS, minC):
+            # We use the frequent pattern mining supported in spark ML called the FP-growth algorithm to perform the market basket analysis.
+
+            # To train the model, we will prepare the first the needed data into a dataframe.
+            # We intend to find the association rules between various product purchases from all users,
+            # so we are going to analyse market baskets regarding product purchases per user id.
+            # so data needed for it - userId, product purchases
+
+            # The user history compound analysis has the data for userId and list of product purchases.
+            # Perform the data cleaning -
+            # 1.Each userId is unique with regards user_history dictionary.
+            # 2.Maintain the events with event_type=purchase only.
+            # 2.Each product id in the list corresponding to the userId should also be unique
+
+            # user_history_df=historical_data["user_history"].select("user_id","product_history").filter(col("event_type")=="purchase")
+            # user_history_uniq = user_history_df.withColumn("uniq_prod_history",array_distinct("product_history")).drop("product_history")
+            user_product_purchase_history = (
+                total_df.filter(col("event_type") == "purchase")
+                .select(target_col, "product_id")
+                .groupBy(target_col)
+                .agg(collect_set("product_id").alias("uniq_prod_history"))
+            )
+
+            # provide the hyperparameters for the model -
+            # minSupport - support the frequency of purchase of the product. All product with atleast minSupport are considered frequent by the model.
+            # minConfidence - Hyperparameter to specify the minimum confidence for generating association rules from frequent products.
+            # Note : The dataset has many product ids, but the support 2 or more products is very low. Confidence scores not shown for minsupport > 0.001
+
+            fpGrowth = FPGrowth(
+                itemsCol="uniq_prod_history", minSupport=minS, minConfidence=minC
+            )
+
+            # Train the model on the prepared dataframe containing the itemset.
+            model = fpGrowth.fit(user_product_purchase_history)
+
+            print(
+                "Writing: /content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern_"
+                + year
+                + "_"
+                + month
+                + ".parquet"
+            )
+            # model.freqItemsets.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/FreqItemSets/"+target_col+"/"+year+"_"+month+".parquet")
+            # model.associationRules.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".parquet")
+            print(model)
+
+
+class UnderdogProducts:
+    def get_conversion_rate(df, type):
+        print(type)
+        # df.printSchema()
+        df_1 = (
+            df.filter(col("event_type") == "purchase")
+            .groupBy(type)
+            .count()
+            .withColumnRenamed("count", "purchase_count")
+        )
+        # df_1.printSchema()
+        # df_1.show()
+        df_2 = (
+            df.filter(col("event_type") == "view")
+            .groupBy(type)
+            .count()
+            .withColumnRenamed("count", "view_count")
+        )
+        # df_2.printSchema()
+        # df_2.show()
+        df_3 = df_1.join(df_2, [type])
+        # df_3.printSchema()
+        # df_4.show()
+        df_4 = df_3.withColumn(
+            type + "_conversion_rate",
+            ((df_3.purchase_count * 1000) / (df_3.view_count)),
+        )
+        # df_4.printSchema()
+        # df_4.show()
+        # df_4.count()
+        df_5 = df_4.drop("purchase_count")
+        if type == "category_code":
+            df_6 = (
+                df.filter(col("event_type") == "view")
+                .groupBy("category_code")
+                .agg(countDistinct("product_id").alias("distinct_prod_count"))
+            )
+            # df_6.printSchema()
+            df_7 = df_5.join(df_6, [type])
+            # df_7.printSchema()
+            df_8 = df_7.withColumn(
+                "avg_cat_view_count", df_7.view_count / df_7.distinct_prod_count
+            )
+            # df_8.printSchema()
+            return df_8
+        return df_5
+
+    def get_cat_df(df):
+        category_conversion_rate_df = get_conversion_rate(df, "category_code")
+        category_conversion_rate_df_v1 = category_conversion_rate_df.withColumnRenamed(
+            "view_count", "category_view_count"
+        )
+        # category_conversion_rate_df_v1.printSchema()
+        # category_conversion_rate_df_v1.show()
+        return category_conversion_rate_df_v1
+
+    def get_prod_df(df):
+        product_conversion_rate_df = get_conversion_rate(df, "product_id")
+        product_conversion_rate_df.count()
+        prod_conversion_rate_df_v1 = product_conversion_rate_df.withColumnRenamed(
+            "view_count", "product_view_count"
+        )
+        # prod_conversion_rate_df_v1.printSchema()
+        # prod_conversion_rate_df_v1.show()
+        return prod_conversion_rate_df_v1
+
+
+class PersonalizedProductRankGenerator:
+    # user_detail_df has the adjustment factor which is (purchase_count_per_brand/total number of purchases)
+    def get_user_detail_df(df):
+        # Total user purchase count
+        user_purchase_count_df = (
+            df.filter(col("event_type") == "purchase")
+            .groupBy("user_id")
+            .count()
+            .withColumnRenamed("count", "user_purchase_count")
+        )
+        # user_purchase_count_df.printSchema()
+
+        # Purchase count per brand for each user
+        user_brand_count_df = (
+            df.filter(col("event_type") == "purchase")
+            .groupBy("user_id", "brand")
+            .count()
+            .withColumnRenamed("count", "brand_purchase_count")
+        )
+        # user_brand_count_df.printSchema()
+
+        # join
+        user_brand_purchase_df = user_purchase_count_df.join(
+            user_brand_count_df, "user_id"
+        )
+
+        # Calculate adjustment factor and append column
+        user_detail_df = user_brand_purchase_df.withColumn(
+            "Adjustment_factor",
+            (
+                user_brand_purchase_df.brand_purchase_count
+                / user_brand_purchase_df.user_purchase_count
+            ),
+        )
+
+        return user_detail_df
+
+    def get_prod_detail_df(df):
+        # Product purchase count
+        df_1 = (
+            df.filter(col("event_type") == "purchase")
+            .groupBy("product_id")
+            .count()
+            .withColumnRenamed("count", "purchase_count")
+        )
+        # df_1.printSchema()
+        # df_1.show()
+
+        # View count per product & brand
+        df_2 = (
+            df.filter(col("event_type") == "view")
+            .groupBy("product_id", "brand")
+            .count()
+            .withColumnRenamed("count", "view_count")
+        )
+        # df_2.printSchema()
+        # df_2.show()
+
+        # Join on product id
+        df_3 = df_1.join(df_2, "product_id")
+        # df_3.printSchema()
+        # df_3.show()
+
+        # Get prod_conversion_rate for all products, i.e., product rank
+        df_4 = df_3.withColumn(
+            "prod_conversion_rate", ((df_3.purchase_count * 1000) / (df_3.view_count))
+        )
+        # df_4.printSchema()
+        # df_4.show()
+
+        # Removing irrelevant columns
+        prod_detail_df = df_4.drop(*("purchase_count", "view_count"))
+        # prod_detail_df.printSchema()
+
+        return prod_detail_df
+
+    def get_cartesian_prod_user_id(df, user_set):
+        prod_df = df.select("product_id")
+        user_id_df = df.select("user_id").where(col("user_id").isin(user_set))
+        prod_user_df = prod_df.crossJoin(user_id_df)
+        return prod_user_df
+
+    def get_user_wise_prod_rank(df):
+        # User specific preference to get adjustment factor
+        user_detail_df = get_user_detail_df(df)
+        user_detail_df.printSchema()
+
+        # Base Product rank
+        prod_detail_df = get_prod_detail_df(df)
+        prod_detail_df.printSchema()
+
+        # Base Table - product user id cartesian product
+        user_set = [571815000]
+        prod_user_df = get_cartesian_prod_user_id(df, user_set)
+        prod_user_df.printSchema()
+
+        # Base Table joined with Base Product Rank Table
+        prod_refined_df = prod_user_df.join(prod_detail_df, "product_id")
+        prod_refined_df.printSchema()
+
+        # master table
+        master_df = prod_refined_df.join(user_detail_df, ["brand", "user_id"]).drop(
+            *("user_purchase_count", "brand_purchase_count")
+        )
+        master_df.printSchema()
+
+        # user wise product rank
+        user_prod_rank_df = master_df.withColumn(
+            "Final product rank",
+            (master_df.prod_conversion_rate * master_df.Adjustment_factor),
+        )
+
+        return user_prod_rank_df
+
+
 def main():
     execution_mode = "user_profile_etl"
     raw_data_files = [
@@ -402,29 +1091,172 @@ def main():
     )
     year_month = {"2020": ["03", "04"]}
     paths = []
-
-    if execution_mode == "raw_data_etl":
-        for path in raw_data_files:
-            RawDataProcessor(path, output_parquet_save_path)
-    else:
+    if execution_mode == "xfactor-2":
         for year, months in year_month.items():
             for month in months:
-                paths.append(
+                path = (
                     "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
                     + year
                     + "-"
                     + month
                     + "*"
                 )
-        basePath = "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/"
-        tdf = spark.read.option("basePath", basePath).parquet(*paths)
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                XFactorGenerator().PPA2_ETL(df, year, month)
+    elif execution_mode == "cat_stat_gen":
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                XFactorGenerator().run_df_gen(df)
+    elif execution_mode == "continue_sessions":
+        year_month = {"2019": ["10", "11", "12"], "2020": ["01", "02", "03", "04"]}
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                SessionInsights().continue_left_off(df, year, month)
+    elif execution_mode == "conversion_rates":
+        year_month = {"2019": ["10", "11", "12"], "2020": ["01", "02", "03", "04"]}
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                SessionInsights().user_conversion_rate(df, year, month)
+    elif execution_mode == "fpgrowth_rules":
+        year_month = {"2019": ["10", "11", "12"], "2020": ["01", "02", "03", "04"]}
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                target_col = "user_id"  # user_session
+                minS = 0.001
+                minC = 0.0001
+                SessionInsights().product_pattern_gen(
+                    df, year, month, "user_id", minS, minC
+                )
+    elif execution_mode == "underdog_products":
+        year_month = {"2019": ["10"]}
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+                cat_df = get_cat_df(df)
+                prod_df = get_prod_df(df)
+                # product catgeory mapping - 60371 rows
+                unique_prod_df = df.dropDuplicates(["product_id"]).select(
+                    "product_id", "category_code"
+                )
 
-        if execution_mode == "user_profile_etl":
-            UserProfileGenerator(
-                tdf=tdf, save_flag=True, save_tag="2", category_flag=True
-            )
-        elif execution_mode == "catalog_etl":
-            CatalogGenerator(tdf=tdf, save_flag=True, save_tag="4", category_flag=True)
+                # product category along with product values
+                prod_cat_code_df = prod_df.join(unique_prod_df, ["product_id"])
+                prod_cat_code_df.printSchema()
+
+                # master df containing all required values for prod and category
+                master_df = prod_cat_code_df.join(cat_df, ["category_code"])
+                master_df.printSchema()
+                # master_df.count() # 16737 rows
+                # master_df.show()
+
+                # Find underdog products
+                underdog_df = master_df.filter(
+                    master_df.product_view_count < 0.5 * master_df.avg_cat_view_count
+                )  # product view is less tha 50% of avg category view count
+                # product conversion rate is greater than 3X of category conversion rate
+                underdog_df_v1 = underdog_df.filter(
+                    underdog_df.product_id_conversion_rate
+                    > (3 * underdog_df.category_code_conversion_rate)
+                )
+                underdog_df_v1.printSchema()
+                # 861 products
+                # underdog_df_v1.count()
+                underdog_df_v1.show()
+                underdog_df_v1.write.parquet(
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/Underdog_Products/prod_"
+                    + year
+                    + "_"
+                    + month
+                    + ".parquet"
+                )
+    elif execution_mode == "personalized_product_rank":
+        year_month = {"2019": ["10"]}
+        for year, months in year_month.items():
+            for month in months:
+                path = (
+                    "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                    + year
+                    + "-"
+                    + month
+                    + "*"
+                )
+                print("Reading :" + path)
+                df = spark.read.parquet(path)
+
+                user_wise_prod_rank_df = get_user_wise_prod_rank(df)
+                user_wise_prod_rank_df.printSchema()
+
+                user_wise_prod_rank_df.count()
+    else:
+        if execution_mode == "raw_data_etl":
+            for path in raw_data_files:
+                RawDataProcessor(path, output_parquet_save_path)
+        else:
+            for year, months in year_month.items():
+                for month in months:
+                    paths.append(
+                        "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/date="
+                        + year
+                        + "-"
+                        + month
+                        + "*"
+                    )
+            basePath = "/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/schema_verified/"
+            tdf = spark.read.option("basePath", basePath).parquet(*paths)
+
+            if execution_mode == "user_profile_etl":
+                UserProfileGenerator(
+                    tdf=tdf, save_flag=True, save_tag="2", category_flag=True
+                )
+            elif execution_mode == "catalog_etl":
+                CatalogGenerator(
+                    tdf=tdf, save_flag=True, save_tag="4", category_flag=True
+                )
 
 
 if __name__ == "__main__":
