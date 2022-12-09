@@ -14,7 +14,7 @@ Product Compound Analytics
 
 Product Purchase Pattern Analytics
 - Approach #1 : associative confidence score between 2 products based on how many users/user_sessions for viewed/purchased events.
-- Approach #2 : Market Basket Analysis through spark ML model.
+- Approach #2 : Market Basket Analysis through spark ML model
 
 # Spark Setup and Initialization
 """
@@ -131,7 +131,7 @@ revenue_events=sales_events.groupBy("product_id").agg(F.sum("price").alias("tota
 view_events=total_df.filter(col("event_type")=="view").select("product_id").groupBy("product_id").agg(F.count("product_id").alias("total_views")).filter(col("total_views")>1000)
 Prod_revenue_rate = revenue_events.join(view_events,revenue_events["product_id"] == view_events["product_id"], "inner").withColumn("revenue_rate",col('total_revenue')/col('total_views')).sort(desc("revenue_rate"))
 
-"""###user product view history & product co-view confidence score
+"""###user product view history & associative product confidence score based on views
  to be added to user_history
 """
 
@@ -163,7 +163,7 @@ product_view_association_rule.show(10)
 
 product_view_association_rule.count()
 
-"""###user product purchase history & product co-purchase confidence score"""
+"""###user product purchase history & associative product confidence score based on purchases"""
 
 user_product_purchase_history=total_df.filter(col("event_type") == "purchase").select(target_col, "product_id").groupBy(target_col).agg(collect_set("product_id").alias("uniq_prod_history"))
 
@@ -189,7 +189,8 @@ Market basket analysis to reveal product groupings and products that are likely 
 """
 
 from pyspark.ml.fpm import FPGrowth
-from pyspark.sql.functions import array_distinct
+from pyspark.ml.fpm import FPGrowthModel
+from pyspark.sql.functions import array_distinct,format_number
 
 #can get product association based on how many users(user_id) or how many user_session
 target_col = "user_id"
@@ -214,6 +215,7 @@ target_col = "user_id"
 #user_history_df=historical_data["user_history"].select("user_id","product_history").filter(col("event_type")=="purchase")
 #user_history_uniq = user_history_df.withColumn("uniq_prod_history",array_distinct("product_history")).drop("product_history")
 user_product_purchase_history=total_df.filter(col("event_type") == "purchase").select(target_col, "product_id").groupBy(target_col).agg(collect_set("product_id").alias("uniq_prod_history"))
+user_product_purchase_history.show(5)
 
 """###Train the FPGrowth model choosing appropriate hyperparameters"""
 
@@ -238,14 +240,16 @@ model.freqItemsets.orderBy(col("freq").desc())
 #antecedent = numerator of the ratio for confidence, consequent = denominator of the ratio.
 model.associationRules.orderBy(col("confidence").desc())
 
-model.freqItemsets.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/FreqItemSets/"+target_col+"/all_months.parquet")
-model.associationRules.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.parquet")
+model.freqItemsets.write.mode('overwrite').parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/FreqItemSets/"+target_col+"/all_months.parquet")
+model.associationRules.write.mode('overwrite').parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.parquet")
+model.write().overwrite().save("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.model")
 
 #TBD - prediction
 
 """#Product Pattern File Generation"""
 
-def product_pattern_gen(total_df, target_col, minS, minC ):
+# frequent itemset and association rules are write only through the api. parquet can be read for recommendations.
+def product_pattern_gen(total_df, target_col, month, year, minS, minC ):
   #We use the frequent pattern mining supported in spark ML called the FP-growth algorithm to perform the market basket analysis.
 
   #To train the model, we will prepare the first the needed data into a dataframe.
@@ -262,7 +266,7 @@ def product_pattern_gen(total_df, target_col, minS, minC ):
   #user_history_df=historical_data["user_history"].select("user_id","product_history").filter(col("event_type")=="purchase")
   #user_history_uniq = user_history_df.withColumn("uniq_prod_history",array_distinct("product_history")).drop("product_history")
   user_product_purchase_history=total_df.filter(col("event_type") == "purchase").select(target_col, "product_id").groupBy(target_col).agg(collect_set("product_id").alias("uniq_prod_history"))
-
+  
   #provide the hyperparameters for the model - 
   # minSupport - support the frequency of purchase of the product. All product with atleast minSupport are considered frequent by the model.
   #minConfidence - Hyperparameter to specify the minimum confidence for generating association rules from frequent products.
@@ -274,8 +278,22 @@ def product_pattern_gen(total_df, target_col, minS, minC ):
   model = fpGrowth.fit(user_product_purchase_history)
 
   print("Writing: /content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern_"+year+"_"+month+".parquet")
-  model.freqItemsets.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/FreqItemSets/"+target_col+"/"+year+"_"+month+".parquet")
-  model.associationRules.write.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".parquet")
+  model.freqItemsets.write.mode('overwrite').parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/FreqItemSets/"+target_col+"/"+year+"_"+month+".parquet")
+  model.associationRules.write.mode('overwrite').parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".parquet")
+  model.write().overwrite().save("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".model")
+
+def get_product_pattern_prediction(df,target_col,year,month, is_all_month):
+  # ret_df, temp_df = []
+  # for year, months in year_month.items(): year_month={"2019":["10"]}
+  #   for month in months:
+  if(is_all_month):
+    path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.model"
+  else:
+    path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".model"
+  print("Reading :"+path)
+  persistedModel = FPGrowthModel.load(path)
+  ret_df = persistedModel.transform(df)
+  return ret_df
 
 year_month={"2019":["10","11","12"], "2020":["01","02","03","04"]}
 for year, months in year_month.items():
@@ -295,9 +313,51 @@ for year, months in year_month.items():
 """
 
 #Get_frequent_products(top=, #product_in_group=)
-model.freqItemsets.orderBy(col("freq").desc()).show(10)
+model.freqItemsets.orderBy(col("freq").desc()).show(5)
 #Get_product_confidence(productId)
-model.associationRules.orderBy(col("confidence").desc()).show(10)
+model.associationRules.orderBy(col("confidence").desc()).show(5)
+
+year_month={"2019":["10"]}
+is_all_month = True
+year = list(year_month.keys())[0]
+months = list(year_month.values())[0][0]
+
+associationRules = spark.read.parquet("/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+months+".parquet")
+#associationRules.orderBy(col("confidence").desc()).show(5)
+print_df = associationRules.withColumn("new_confidence", format_number(associationRules.confidence, 3)).drop("confidence").withColumnRenamed("new_confidence", "confidence")
+print_df.orderBy(col("confidence").desc()).show(5)
+print_df2 = print_df.withColumn("new_lift", format_number(print_df.lift, 3)).drop("lift").withColumnRenamed("new_lift", "lift")
+print_df2.orderBy(col("confidence").desc()).show(5)
+
+test_DF = spark.createDataFrame([
+    (0, [1004870,1004833])
+], ["id", "items"])
+test = user_product_purchase_history.select("uniq_prod_history").filter(size(col("uniq_prod_history")) == 2)
+test2 = test.limit(10)
+test2.show()
+
+model.transform(test2).show()
+
+year_month={"2019":["10"]}
+is_all_month = False
+year, months = year_month.items()
+print(year,months)
+if(is_all_month):
+  path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.model"
+else:
+  path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".model"
+
+persistedModel = FPGrowthModel.load(path)
+test_DF = spark.createDataFrame([
+    (0, [1004870,1004833])
+], ["uniq_prod_history", "perdiction"])
+test = user_product_purchase_history.select("uniq_prod_history").filter(size(col("uniq_prod_history")) == 2)
+test2 = test.limit(10)
+test2.show()
+
+tr_df = persistedModel.transform(test2)
+ret_df = tr_df.append(test_DF)
+ret_df.show()
 
 """#Plots
 
@@ -318,3 +378,16 @@ df = spark.createDataFrame([("u1",['hot','summer', 'book'],),
 
 df1 = df.withColumn("new_col", combinations_udf(F.col("col1")))
 df1.show()
+
+year_month={"2019":["10"]}
+is_all_month = True
+year = list(year_month.keys())[0]
+months = list(year_month.values())[0][0]
+if(is_all_month):
+  path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/all_months.model"
+else:
+  path="/content/drive/Shareddrives/FourYottaBytes_DA231o/eCommerce/FrequentPattern/associationRules/"+target_col+"/"+year+"_"+month+".model"
+
+#year, months = year_month.items()
+print(year,months)
+print(path)
